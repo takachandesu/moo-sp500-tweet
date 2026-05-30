@@ -16,6 +16,7 @@ import datetime
 import requests
 import tweepy
 import anthropic
+from decimal import Decimal, ROUND_HALF_UP
 from sp500_tickers import SP500_TICKERS
 
 # ============================================================
@@ -24,7 +25,12 @@ from sp500_tickers import SP500_TICKERS
 STOOQ_BASE = "https://stooq.com/q/l/?s={syms}&f=sd2t2ohlcvbp&h&e=csv"
 BATCH_SIZE = 40       # Stooqに1リクエストで送る銘柄数
 BATCH_DELAY = 0.5     # バッチ間の待機秒数
-TOP_N = 4             # ベスト/ワースト件数
+TOP_N = 4             # ベスト/ワースト件数 (最大)
+MIN_N = 3             # 文字数が収まらない時に減らす最小件数
+
+HEATMAP_URL = "https://moo-stock-blog.com/heatmap/"  # ツイート末尾に付けるURL
+TWEET_LIMIT = 280     # Xの文字数上限 (重み付き)
+URL_WEIGHT = 23       # XはURLを t.co 短縮で一律23文字として数える
 
 
 # ============================================================
@@ -146,8 +152,48 @@ def summarize(stocks):
 # ============================================================
 # 3. ツイート文の生成 (LLM不要・テンプレート)
 # ============================================================
-def build_tweet(summary, indices, date_str):
-    """ツイート文を生成 (280文字以内)"""
+def fmt_pct(chg):
+    """変化率を小数第1位まで(第2位を四捨五入)で符号付きフォーマット。
+    例: 5.234 → '+5.2%' / -3.95 → '-4.0%' / -0.04 → '+0.0%'"""
+    v = Decimal(str(chg)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)
+    if v == 0:
+        v = Decimal('0.0')  # -0.0 を 0.0 に正規化
+    sign = '+' if v >= 0 else ''
+    return f"{sign}{v}%"
+
+
+def tweet_weighted_len(text):
+    """Xの重み付き文字数を概算する。
+    - URL(HEATMAP_URL)は一律 URL_WEIGHT 文字
+    - CJK・全角・絵文字は2文字
+    - それ以外(半角英数記号・改行)は1文字"""
+    # URLを23文字分のプレースホルダに置換してから数える
+    text = text.replace(HEATMAP_URL, 'x' * URL_WEIGHT)
+    weight = 0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x1100 <= cp <= 0x115F or   # ハングル字母
+            0x2E80 <= cp <= 0x303E or   # CJK部首・記号
+            0x3041 <= cp <= 0x33FF or   # かな・CJK記号
+            0x3400 <= cp <= 0x4DBF or   # CJK拡張A
+            0x4E00 <= cp <= 0x9FFF or   # CJK統合漢字
+            0xA000 <= cp <= 0xA4CF or
+            0xAC00 <= cp <= 0xD7A3 or   # ハングル音節
+            0xF900 <= cp <= 0xFAFF or
+            0xFE30 <= cp <= 0xFE4F or
+            0xFF00 <= cp <= 0xFF60 or   # 全角英数記号
+            0xFFE0 <= cp <= 0xFFE6 or
+            cp >= 0x1F000               # 絵文字など補助面
+        ):
+            weight += 2
+        else:
+            weight += 1
+    return weight
+
+
+def build_tweet(summary, indices, date_str, n=TOP_N):
+    """ツイート文を生成 (ベスト/ワースト n 件、URLを末尾に付与)"""
     spx = indices.get('^SPX')
     ndq = indices.get('^NDQ')
     
@@ -156,26 +202,34 @@ def build_tweet(summary, indices, date_str):
     ]
     
     if spx and ndq:
-        spx_sign = '+' if spx['chg'] >= 0 else ''
-        ndq_sign = '+' if ndq['chg'] >= 0 else ''
-        lines.append(f"S&P500 {spx_sign}{spx['chg']:.2f}% / NASDAQ {ndq_sign}{ndq['chg']:.2f}%")
+        lines.append(f"S&P500 {fmt_pct(spx['chg'])} / NASDAQ {fmt_pct(ndq['chg'])}")
     
     lines.append("")
     lines.append("📈 ベスト")
-    for i, s in enumerate(summary['best'], 1):
-        sign = '+' if s['chg'] >= 0 else ''
-        lines.append(f"{i}. {s['ticker']} {sign}{s['chg']:.2f}%")
+    for i, s in enumerate(summary['best'][:n], 1):
+        lines.append(f"{i}. {s['ticker']} {fmt_pct(s['chg'])}")
     
     lines.append("")
     lines.append("📉 ワースト")
-    for i, s in enumerate(summary['worst'], 1):
-        sign = '+' if s['chg'] >= 0 else ''
-        lines.append(f"{i}. {s['ticker']} {sign}{s['chg']:.2f}%")
+    for i, s in enumerate(summary['worst'][:n], 1):
+        lines.append(f"{i}. {s['ticker']} {fmt_pct(s['chg'])}")
     
     lines.append("")
     lines.append("#米国株 #SP500")
+    lines.append(HEATMAP_URL)  # URLは最後
     
     return '\n'.join(lines)
+
+
+def build_tweet_fit(summary, indices, date_str):
+    """まず TOP_N 件で組み立て、文字数上限を超える場合は MIN_N 件まで減らす。
+    戻り値: (ツイート文, 採用した件数)"""
+    for n in range(TOP_N, MIN_N - 1, -1):
+        text = build_tweet(summary, indices, date_str, n)
+        if tweet_weighted_len(text) <= TWEET_LIMIT:
+            return text, n
+    # MIN_N でも超える場合はそのまま返す (最低件数)
+    return build_tweet(summary, indices, date_str, MIN_N), MIN_N
 
 
 # ============================================================
@@ -375,8 +429,9 @@ def main():
     market_date = jst_now - datetime.timedelta(days=1)
     date_str = market_date.strftime('%-m/%-d')
     
-    tweet_text = build_tweet(summary, indices, date_str)
-    print(f"  ツイート文 ({len(tweet_text)}文字):")
+    tweet_text, used_n = build_tweet_fit(summary, indices, date_str)
+    print(f"  ツイート文 (ベスト/ワースト各{used_n}件 / "
+          f"{len(tweet_text)}文字 / 重み付き{tweet_weighted_len(tweet_text)}):")
     print("-" * 40)
     print(tweet_text)
     print("-" * 40)
