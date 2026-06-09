@@ -24,7 +24,7 @@ from sp500_tickers import SP500_TICKERS
 # 設定
 # ============================================================
 STOOQ_BASE = "https://stooq.com/q/l/?s={syms}&f=sd2t2ohlcvbp&h&e=csv"
-BATCH_SIZE = 40       # Stooqに1リクエストで送る銘柄数
+BATCH_SIZE = 10       # Stooqに1リクエストで送る銘柄数 (多すぎると404エラーページが返るため小さめに)
 BATCH_DELAY = 0.5     # バッチ間の待機秒数
 TOP_N = 4             # ベスト/ワースト件数 (最大)
 MIN_N = 3             # 文字数が収まらない時に減らす最小件数
