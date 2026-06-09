@@ -17,6 +17,7 @@ import requests
 import tweepy
 import anthropic
 from decimal import Decimal, ROUND_HALF_UP
+from urllib.parse import quote
 from sp500_tickers import SP500_TICKERS
 
 # ============================================================
@@ -28,6 +29,19 @@ BATCH_DELAY = 0.5     # バッチ間の待機秒数
 TOP_N = 4             # ベスト/ワースト件数 (最大)
 MIN_N = 3             # 文字数が収まらない時に減らす最小件数
 
+# Stooqへのアクセス方法
+# GitHub Actionsから直接Stooqを叩くとIPでレート制限/ブロックされ全件0になることがある。
+# デフォルトでは、ヒートマップで実績のあるロリポップのPHPプロキシ経由で取得する。
+# 直接取得に戻したい場合は環境変数 USE_PROXY=0 を設定する。
+USE_PROXY = os.environ.get('USE_PROXY', '1') != '0'
+PROXY_BASE = os.environ.get('PROXY_BASE', 'https://moo-stock-blog.com/stock-proxy.php')
+SITE_ORIGIN = 'https://moo-stock-blog.com'
+HTTP_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                   '(KHTML, like Gecko) Chrome/124.0 Safari/537.36'),
+    'Referer': SITE_ORIGIN + '/',
+}
+
 HEATMAP_URL = "https://moo-stock-blog.com/heatmap/"  # ツイート末尾に付けるURL
 TWEET_LIMIT = 280     # Xの文字数上限 (重み付き)
 URL_WEIGHT = 23       # XはURLを t.co 短縮で一律23文字として数える
@@ -36,14 +50,38 @@ URL_WEIGHT = 23       # XはURLを t.co 短縮で一律23文字として数え�
 # ============================================================
 # 1. Stooqからデータ取得
 # ============================================================
+def build_request_url(symbols):
+    """取得先URLを組み立てる。USE_PROXY時はPHPプロキシ経由のURLにする。"""
+    target = STOOQ_BASE.format(syms='+'.join(symbols))
+    if USE_PROXY:
+        return f"{PROXY_BASE}?url={quote(target, safe='')}"
+    return target
+
+
+def looks_like_rate_limit(body):
+    """Stooqのレート制限/エラー応答かどうかを簡易判定 (CSVではない短い文言)"""
+    head = body.strip().lower()[:120]
+    return any(k in head for k in ('exceeded', 'limit', 'too many', 'forbidden', 'denied'))
+
+
 def fetch_batch(symbols):
     """1バッチ(40銘柄程度)を取得しCSVをパース"""
-    url = STOOQ_BASE.format(syms='+'.join(symbols))
+    url = build_request_url(symbols)
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=25)
         if r.status_code != 200:
+            print(f"  ⚠ HTTP {r.status_code} / 応答先頭: {r.text[:160]!r}", file=sys.stderr)
             return []
-        return parse_csv(r.text)
+        body = r.text
+        if looks_like_rate_limit(body):
+            # Stooqがレート制限文言を返している(CSVではない)
+            print(f"  ⚠ レート制限/エラー応答の可能性: {body.strip()[:160]!r}", file=sys.stderr)
+            return []
+        rows = parse_csv(body)
+        if not rows:
+            # 200だが0件 → 原因究明のため応答の先頭を出す
+            print(f"  ⚠ パース0件。応答先頭: {body.strip()[:160]!r}", file=sys.stderr)
+        return rows
     except Exception as e:
         print(f"  ⚠ バッチ取得エラー: {e}", file=sys.stderr)
         return []
@@ -400,11 +438,14 @@ def main():
     
     # 1. データ取得
     print("\n[1/5] Stooqからデータ取得中...")
+    print(f"  取得方法: {'PHPプロキシ経由 (' + PROXY_BASE + ')' if USE_PROXY else 'Stooq直接'}")
     stocks = fetch_all_sp500()
     print(f"  取得銘柄数: {len(stocks)} / {len(SP500_TICKERS)}")
     
     if len(stocks) < 100:
         print("✗ 取得銘柄が少なすぎます。中断します。", file=sys.stderr)
+        print("  → 上の ⚠ ログで応答内容を確認してください。", file=sys.stderr)
+        print("  → プロキシ経由でも失敗する場合は USE_PROXY=0 で直接取得も試せます。", file=sys.stderr)
         sys.exit(1)
     
     # 2. 指数取得
