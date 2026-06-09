@@ -1,12 +1,10 @@
 name: S&P500 Daily Post
-
 on:
   schedule:
     # 火〜土 朝8:00 JST = 月〜金 23:00 UTC
     # (米国市場が月〜金で取引終了 → 翌日のJSTで投稿)
     - cron: '0 23 * * 1-5'
   workflow_dispatch: {}  # 手動実行可
-
 jobs:
   post:
     runs-on: ubuntu-latest
@@ -14,19 +12,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           # cache: 'pip' は requirements.txt が無くてエラーになるため指定しない
           # (グロース250での教訓)
-
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests tweepy anthropic
-
+          pip install requests tweepy anthropic yfinance
       - name: Run S&P500 post script
         env:
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
