@@ -30,18 +30,22 @@ TOP_N = 4             # ベスト/ワースト件数 (最大)
 MIN_N = 3             # 文字数が収まらない時に減らす最小件数
 
 # Stooqへのアクセス方法
-# ロリポップは「国外IPアクセス制限」で海外IPを遮断するため、GitHub Actions(米国IP)からは
-# プロキシ(moo-stock-blog.com)に接続できずタイムアウトする。
-# よってデフォルトは Stooq 直接取得。ただしブラウザ用の User-Agent を付けること。
-# python-requests のデフォルトUAだと Stooq にブロックされて全件0件になりやすいため。
-# (どうしてもプロキシ経由にしたい場合のみ環境変数 USE_PROXY=1 を設定する)
-USE_PROXY = os.environ.get('USE_PROXY', '0') != '0'
+# 【重要】GitHub Actionsは米国IPで動くため、StooqはそのIPを404でブロックする
+# (日本IP=ロリポップのプロキシ経由なら同じURLでCSVが返る)。
+# 一方ロリポップは「国外IPアクセス制限」で米国IPからの接続自体を遮断する。
+# → 解決には「ロリポップの国外IPアクセス制限をOFF」にして、本スクリプトを
+#    プロキシ経由(USE_PROXY=1)で動かす必要がある。これでWordPress投稿も復活する。
+#    (ロリポップ管理画面 → セキュリティ → 国外IPアクセス制限 をOFF)
+# 日本国内のマシン/VPSで動かす場合は USE_PROXY=0 の直接取得でもよい。
+USE_PROXY = os.environ.get('USE_PROXY', '1') != '0'
 PROXY_BASE = os.environ.get('PROXY_BASE', 'https://moo-stock-blog.com/stock-proxy.php')
 HTTP_HEADERS = {
     'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                    '(KHTML, like Gecko) Chrome/124.0 Safari/537.36'),
     'Accept': 'text/csv, text/plain, */*',
 }
+# (接続タイムアウト, 読み込みタイムアウト) 秒。接続で弾かれたら早めに失敗させる。
+HTTP_TIMEOUT = (10, 30)
 
 HEATMAP_URL = "https://moo-stock-blog.com/heatmap/"  # ツイート末尾に付けるURL
 TWEET_LIMIT = 280     # Xの文字数上限 (重み付き)
@@ -60,27 +64,29 @@ def build_request_url(symbols):
 
 
 def looks_like_rate_limit(body):
-    """Stooqのレート制限/エラー応答かどうかを簡易判定 (CSVではない短い文言)"""
-    head = body.strip().lower()[:120]
-    return any(k in head for k in ('exceeded', 'limit', 'too many', 'forbidden', 'denied'))
+    """StooqのレートリミットやエラーHTMLかどうかを簡易判定 (CSVではない応答)"""
+    head = body.strip().lower()[:200]
+    return any(k in head for k in (
+        'exceeded', 'too many', 'forbidden', 'denied',
+        '<meta', '<html', '<title>stooq',  # 404等のHTMLエラーページ
+    ))
 
 
 def fetch_batch(symbols):
     """1バッチ(40銘柄程度)を取得しCSVをパース"""
     url = build_request_url(symbols)
     try:
-        r = requests.get(url, headers=HTTP_HEADERS, timeout=25)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
-            print(f"  ⚠ HTTP {r.status_code} / 応答先頭: {r.text[:160]!r}", file=sys.stderr)
+            print(f"  ⚠ HTTP {r.status_code} / 応答先頭: {r.text.strip()[:160]!r}", file=sys.stderr)
             return []
         body = r.text
         if looks_like_rate_limit(body):
-            # Stooqがレート制限文言を返している(CSVではない)
-            print(f"  ⚠ レート制限/エラー応答の可能性: {body.strip()[:160]!r}", file=sys.stderr)
+            # StooqがブロックページやレートリミットHTMLを返している(CSVではない)
+            print(f"  ⚠ Stooqブロック/エラー応答の可能性: {body.strip()[:160]!r}", file=sys.stderr)
             return []
         rows = parse_csv(body)
         if not rows:
-            # 200だが0件 → 原因究明のため応答の先頭を出す
             print(f"  ⚠ パース0件。応答先頭: {body.strip()[:160]!r}", file=sys.stderr)
         return rows
     except Exception as e:
