@@ -24,20 +24,19 @@ from sp500_tickers import SP500_TICKERS
 # 設定
 # ============================================================
 STOOQ_BASE = "https://stooq.com/q/l/?s={syms}&f=sd2t2ohlcvbp&h&e=csv"
-BATCH_SIZE = 10       # Stooqに1リクエストで送る銘柄数 (多すぎると404エラーページが返るため小さめに)
-BATCH_DELAY = 0.5     # バッチ間の待機秒数
+BATCH_SIZE = 10       # 1リクエストの銘柄数。多すぎ(40等)だとURLが長く404になる
+BATCH_DELAY = 1.5     # バッチ間の待機秒数。短すぎると429(Too Many Requests)になる
 TOP_N = 4             # ベスト/ワースト件数 (最大)
 MIN_N = 3             # 文字数が収まらない時に減らす最小件数
 
 # Stooqへのアクセス方法
-# 【重要】GitHub Actionsは米国IPで動くため、StooqはそのIPを404でブロックする
-# (日本IP=ロリポップのプロキシ経由なら同じURLでCSVが返る)。
-# 一方ロリポップは「国外IPアクセス制限」で米国IPからの接続自体を遮断する。
-# → 解決には「ロリポップの国外IPアクセス制限をOFF」にして、本スクリプトを
-#    プロキシ経由(USE_PROXY=1)で動かす必要がある。これでWordPress投稿も復活する。
-#    (ロリポップ管理画面 → セキュリティ → 国外IPアクセス制限 をOFF)
-# 日本国内のマシン/VPSで動かす場合は USE_PROXY=0 の直接取得でもよい。
-USE_PROXY = os.environ.get('USE_PROXY', '1') != '0'
+# 【経緯】プロキシ経由は、サイトのヒートマップ全部が使う共有IPを使うため、
+#   一括取得を連発するとStooqに429(Too Many Requests)でレート制限される。
+#   → デフォルトは Stooq 直接取得。GitHub Actions自身のIPの取得枠を使う方が安定。
+#   404は1リクエストの銘柄数が多すぎる(URLが長い)のが原因なので BATCH_SIZE を小さくする。
+#   429は送りすぎなので BATCH_DELAY を広めに取る。
+#   (プロキシ経由にしたい場合のみ環境変数 USE_PROXY=1)
+USE_PROXY = os.environ.get('USE_PROXY', '0') != '0'
 PROXY_BASE = os.environ.get('PROXY_BASE', 'https://moo-stock-blog.com/stock-proxy.php')
 HTTP_HEADERS = {
     'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -144,8 +143,8 @@ def fetch_all_sp500():
         batch_no = i // BATCH_SIZE + 1
         rows = fetch_batch(batch)
         if not rows:
-            print(f"  [{batch_no}/{n_batches}] 失敗, リトライ")
-            time.sleep(1.0)
+            print(f"  [{batch_no}/{n_batches}] 失敗, 4秒待ってリトライ")
+            time.sleep(4.0)
             rows = fetch_batch(batch)
         # シンボルからティッカーへの逆引きを付与
         for r in rows:
