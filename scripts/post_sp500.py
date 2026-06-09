@@ -30,16 +30,17 @@ TOP_N = 4             # ベスト/ワースト件数 (最大)
 MIN_N = 3             # 文字数が収まらない時に減らす最小件数
 
 # Stooqへのアクセス方法
-# GitHub Actionsから直接Stooqを叩くとIPでレート制限/ブロックされ全件0になることがある。
-# デフォルトでは、ヒートマップで実績のあるロリポップのPHPプロキシ経由で取得する。
-# 直接取得に戻したい場合は環境変数 USE_PROXY=0 を設定する。
-USE_PROXY = os.environ.get('USE_PROXY', '1') != '0'
+# ロリポップは「国外IPアクセス制限」で海外IPを遮断するため、GitHub Actions(米国IP)からは
+# プロキシ(moo-stock-blog.com)に接続できずタイムアウトする。
+# よってデフォルトは Stooq 直接取得。ただしブラウザ用の User-Agent を付けること。
+# python-requests のデフォルトUAだと Stooq にブロックされて全件0件になりやすいため。
+# (どうしてもプロキシ経由にしたい場合のみ環境変数 USE_PROXY=1 を設定する)
+USE_PROXY = os.environ.get('USE_PROXY', '0') != '0'
 PROXY_BASE = os.environ.get('PROXY_BASE', 'https://moo-stock-blog.com/stock-proxy.php')
-SITE_ORIGIN = 'https://moo-stock-blog.com'
 HTTP_HEADERS = {
     'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                    '(KHTML, like Gecko) Chrome/124.0 Safari/537.36'),
-    'Referer': SITE_ORIGIN + '/',
+    'Accept': 'text/csv, text/plain, */*',
 }
 
 HEATMAP_URL = "https://moo-stock-blog.com/heatmap/"  # ツイート末尾に付けるURL
