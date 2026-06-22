@@ -223,7 +223,7 @@ def build_tweet(summary, indices, date_str, n=TOP_N):
 
     lines.append("")
     lines.append("#米国株 #SP500")
-    lines.append(HEATMAP_URL)  # URLは最後
+    lines.append("ニュース詳細はプロフィールのリンクと固定ポストに。")  # 固定ポスト/リンクへ誘導(URLなし=通常ポスト課金)
 
     return '\n'.join(lines)
 
